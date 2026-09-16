@@ -1,4 +1,7 @@
-const state={all:[],references:[],lessons:[],deck:[],index:0,revealed:false,again:0,good:0,quickSeen:0,type:'all',direction:'ja-zh',year:null,lesson:null,ratingEnabled:localStorage.getItem('jp-study-rating-options')==='true',view:'review',library:{query:'',years:[],lessons:[],types:[]}};
+import {filterReviewDeck,normalizeReviewProgress,resetReviewStatuses,reviewCounts,reviewKeyFor,reviewRecordFor,sequenceForReviewMode,setReviewStatus,toggleReviewBookmark} from './src/flashcard-review.mjs?v=flashcard-mode-reset-1';
+
+const REVIEW_STORAGE_KEY='jp-study-flashcard-review-progress';
+const state={all:[],references:[],lessons:[],scopeDeck:[],deck:[],index:0,revealed:false,quickSeen:0,type:'all',direction:'ja-zh',year:null,lesson:null,orderMode:localStorage.getItem('jp-study-card-order-mode')==='random'?'random':'sequential',reviewFilter:'all',reviewProgress:normalizeReviewProgress(readJsonStorage(REVIEW_STORAGE_KEY,{})),view:'review',library:{query:'',years:[],lessons:[],types:[]}};
 let fallbackAudio=null;
 const $=selector=>document.querySelector(selector);
 const $$=selector=>[...document.querySelectorAll(selector)];
@@ -53,10 +56,16 @@ function updateCourseDetails(){
   if(deckSummary)deckSummary.textContent=`現有 Lesson ${state.lesson}：${vocabularyCount} 個生字、${grammarCount} 項文法。`;
 }
 
-function resetDeck(shuffle=false){
-  state.deck=[...currentPool()];
-  if(shuffle){for(let i=state.deck.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[state.deck[i],state.deck[j]]=[state.deck[j],state.deck[i]];}}
-  state.index=0;state.revealed=false;state.again=0;state.good=0;state.quickSeen=0;
+function saveReviewProgress(){localStorage.setItem(REVIEW_STORAGE_KEY,JSON.stringify(state.reviewProgress));}
+function applyReviewFilter(currentId=null){
+  state.deck=filterReviewDeck(state.scopeDeck,state.reviewProgress,state.reviewFilter);
+  const currentIndex=currentId?state.deck.findIndex(item=>reviewKeyFor(item)===currentId):-1;
+  state.index=currentIndex>=0?currentIndex:0;
+}
+function resetDeck(){
+  state.scopeDeck=sequenceForReviewMode(currentPool(),state.orderMode);
+  applyReviewFilter();
+  state.index=0;state.revealed=false;state.quickSeen=0;
   $('.crumb span').textContent=`Year ${state.year}`;$('.crumb b').textContent=`Lesson ${String(state.lesson).padStart(2,'0')}`;
   updateCourseDetails();
   renderCard();
@@ -64,14 +73,22 @@ function resetDeck(shuffle=false){
 
 function renderCard(){
   const total=state.deck.length;
+  const counts=reviewCounts(state.scopeDeck,state.reviewProgress);
+  renderReviewFilters(counts);
   $('#deck-total').textContent=`${total} 張`;
-  $('#rating-options').checked=state.ratingEnabled;
-  $('#card-position').textContent=state.index<total?`Card ${state.index+1} of ${total}`:'Session complete';
-  $('#session-type').textContent=state.ratingEnabled?(state.type==='all'?'Memory check':state.type==='grammar'?'Grammar check':'Vocabulary check'):'Quick flashcards';
+  $('#card-position').textContent=total?`Card ${state.index+1} of ${total}`:'目前沒有卡片';
+  $('#session-type').textContent=state.orderMode==='random'?'Random review':'Sequential review';
   $('#progress-fill').style.width=`${total?Math.min(state.index/total*100,100):0}%`;
-  $('#session-numbers').innerHTML=state.ratingEnabled?`<span><i class="number-dot again"></i><b id="again-count">${state.again}</b> 待重溫</span><span><i class="number-dot good"></i><b id="good-count">${state.good}</b> 已記起</span>`:`<span><i class="number-dot good"></i><b>${Math.min(state.quickSeen,total)}</b> 已瀏覽</span><span>可直接按 → 換下一張</span>`;
+  $('#session-numbers').innerHTML=`<span><i class="number-dot good"></i><b>${Math.min(state.quickSeen,total)}</b> 已瀏覽</span><span>可直接按 → 換下一張</span>`;
+  renderOrderModeToggle();
   $('#card-jump-row').hidden=!total;
-  if(!total){$('#flashcard').className='flashcard finished';$('#flashcard').innerHTML='<h2>呢個卡組未有內容</h2>';$('#answer-actions').innerHTML='';return;}
+  if(!total){
+    const emptyMessage={incorrect:'目前沒有答錯的單字。',correct:'目前沒有答對的單字。',bookmarked:'目前沒有收藏的單字。'}[state.reviewFilter]||'呢個卡組未有內容';
+    $('#flashcard').className='flashcard finished';$('#flashcard').innerHTML=`<h2>${emptyMessage}</h2>${state.reviewFilter!=='all'?'<p>可返回全部卡片繼續溫習。</p>':''}`;
+    $('#answer-actions').innerHTML=state.reviewFilter==='all'?'': '<button class="reveal-button" id="show-all-review-button">返回全部</button>';
+    $('#show-all-review-button')?.addEventListener('click',()=>setReviewFilter('all'));
+    return;
+  }
   if(state.index>=total){renderFinished();return;}
   $('#card-jump').max=total;$('#card-jump').value=state.index+1;$('#card-total-label').textContent=`/ ${total}`;
   const item=state.deck[state.index];
@@ -88,21 +105,79 @@ function renderCard(){
 }
 
 function renderAnswerActions(total=state.deck.length){
-  const center=state.revealed
-    ?(state.ratingEnabled?'<button class="rate-again compact-rate" data-rate="again" aria-label="唔記得">×</button><button class="rate-hard compact-rate" data-rate="hard" aria-label="有啲難">△</button><button class="rate-good compact-rate" data-rate="good" aria-label="記得了">✓</button>':'<button class="reveal-button" id="hide-answer-button">收起答案 <span>Space</span></button>')
-    :'<button class="reveal-button" id="reveal-button">翻轉睇答案 <span>Space</span></button>';
-  $('#answer-actions').innerHTML=`<button class="card-nav-button" id="previous-button" ${state.index===0?'disabled':''} aria-label="上一張">←</button><div class="card-primary-actions">${center}</div><button class="card-nav-button" id="next-button" aria-label="${state.index===total-1?'完成溫習':'下一張'}">→</button>`;
+  const item=state.deck[state.index],record=reviewRecordFor(state.reviewProgress,item);
+  $('#answer-actions').innerHTML=`<button class="card-nav-button" id="previous-button" ${state.index===0?'disabled':''} aria-label="上一張" title="上一張">←</button><button class="review-mark-button incorrect ${record.status==='incorrect'?'selected':''}" id="mark-incorrect-button" aria-pressed="${record.status==='incorrect'}" aria-label="標記答錯" title="答錯（X）">✕</button><button class="review-mark-button bookmark ${record.bookmarked?'selected':''}" id="bookmark-button" aria-pressed="${Boolean(record.bookmarked)}" aria-label="${record.bookmarked?'取消收藏':'收藏'}" title="收藏（S）">${record.bookmarked?'★':'☆'}</button><button class="review-mark-button correct ${record.status==='correct'?'selected':''}" id="mark-correct-button" aria-pressed="${record.status==='correct'}" aria-label="標記答對" title="答對（C）">✓</button><button class="card-nav-button" id="next-button" aria-label="${state.index===total-1?'下一張':'下一張'}" title="下一張">→</button>`;
   $('#previous-button').addEventListener('click',previousQuickCard);
   $('#next-button').addEventListener('click',nextQuickCard);
-  if(state.revealed&&state.ratingEnabled)$$('[data-rate]').forEach(button=>button.addEventListener('click',()=>rateCard(button.dataset.rate)));
-  else if(state.revealed)$('#hide-answer-button').addEventListener('click',hideAnswer);
-  else $('#reveal-button').addEventListener('click',revealCard);
+  $('#mark-incorrect-button').addEventListener('click',()=>markCurrentCard('incorrect'));
+  $('#mark-correct-button').addEventListener('click',()=>markCurrentCard('correct'));
+  $('#bookmark-button').addEventListener('click',toggleCurrentBookmark);
 }
 
-function previousQuickCard(){if(state.index===0)return;state.index--;state.revealed=false;renderCard();}
-function nextQuickCard(){
-  state.quickSeen=Math.max(state.quickSeen,state.index+1);incrementToday();state.index++;state.revealed=false;
+function renderReviewFilters(counts=reviewCounts(state.scopeDeck,state.reviewProgress)){
+  const labels={all:'全部',incorrect:'答錯',correct:'答對',bookmarked:'收藏'};
+  $('#review-filter-bar').innerHTML=Object.entries(labels).map(([filter,label])=>`<button type="button" class="review-filter ${state.reviewFilter===filter?'active':''}" data-review-filter="${filter}" aria-pressed="${state.reviewFilter===filter}"><span>${label}</span><b>${counts[filter]}</b></button>`).join('');
+  $$('[data-review-filter]').forEach(button=>button.addEventListener('click',()=>setReviewFilter(button.dataset.reviewFilter)));
+}
+function setReviewFilter(filter){
+  if(!['all','incorrect','correct','bookmarked'].includes(filter)||filter===state.reviewFilter)return;
+  const current=state.deck[state.index];
+  state.reviewFilter=filter;
+  applyReviewFilter(current?reviewKeyFor(current):null);
+  state.revealed=false;
   renderCard();
+}
+
+function renderOrderModeToggle(){
+  $$('[data-order-mode]').forEach(button=>{
+    const active=button.dataset.orderMode===state.orderMode;
+    button.classList.toggle('active',active);button.setAttribute('aria-pressed',String(active));
+  });
+}
+function setOrderMode(mode){
+  if(!['sequential','random'].includes(mode)||mode===state.orderMode)return;
+  state.orderMode=mode;localStorage.setItem('jp-study-card-order-mode',mode);
+  state.scopeDeck=sequenceForReviewMode(currentPool(),mode);
+  applyReviewFilter();
+  state.index=0;state.revealed=false;state.quickSeen=0;
+  renderCard();
+}
+function markCurrentCard(status){
+  const item=state.deck[state.index];if(!item)return;
+  state.reviewProgress=setReviewStatus(state.reviewProgress,item,status);saveReviewProgress();
+  renderCard();
+}
+function toggleCurrentBookmark(){
+  const item=state.deck[state.index];if(!item)return;
+  state.reviewProgress=toggleReviewBookmark(state.reviewProgress,item);saveReviewProgress();
+  renderCard();
+}
+function reconcileDeckForNavigation(direction){
+  const current=state.deck[state.index];
+  if(!current)return false;
+  const currentScopeIndex=state.scopeDeck.findIndex(item=>reviewKeyFor(item)===reviewKeyFor(current));
+  const filtered=filterReviewDeck(state.scopeDeck,state.reviewProgress,state.reviewFilter);
+  const target=direction>0
+    ?filtered.findIndex(item=>state.scopeDeck.findIndex(scopeItem=>reviewKeyFor(scopeItem)===reviewKeyFor(item))>currentScopeIndex)
+    :[...filtered].reverse().findIndex(item=>state.scopeDeck.findIndex(scopeItem=>reviewKeyFor(scopeItem)===reviewKeyFor(item))<currentScopeIndex);
+  state.deck=filtered;
+  if(target<0){
+    if(direction<0&&filtered.length){state.index=0;return true;}
+    state.index=Math.max(0,filtered.length-1);return false;
+  }
+  state.index=direction>0?target:filtered.length-1-target;
+  return true;
+}
+function previousQuickCard(){
+  if(!state.deck.length||state.index===0&&state.reviewFilter==='all')return;
+  const moved=reconcileDeckForNavigation(-1);if(!moved)return;
+  state.revealed=false;renderCard();
+}
+function nextQuickCard(){
+  if(!state.deck.length)return;
+  state.quickSeen=Math.max(state.quickSeen,state.index+1);incrementToday();
+  const moved=reconcileDeckForNavigation(1);if(!moved){renderCard();return;}
+  state.revealed=false;renderCard();
 }
 
 function answerBackHtml(item,japanese,reverse){
@@ -129,21 +204,15 @@ function speakJapanese(text){
 }
 function revealCard(){if(state.revealed||state.index>=state.deck.length)return;state.revealed=true;$('#flashcard').classList.add('is-flipped');$('#flashcard').setAttribute('aria-label','答案已顯示');renderAnswerActions();}
 function hideAnswer(){if(!state.revealed)return;state.revealed=false;$('#flashcard').classList.remove('is-flipped');$('#flashcard').setAttribute('aria-label','溫習卡，按下顯示答案');renderAnswerActions();}
-function rateCard(rating){
-  const item=state.deck[state.index];
-  if(rating==='again'){state.again++;state.deck.push(item);}else{state.good++;if(rating==='good')saveMastered(item.id);}
-  incrementToday();state.index++;state.revealed=false;renderCard();
-}
 function renderFinished(){
   $('#progress-fill').style.width='100%';$('#flashcard').className='flashcard finished';
   $('#card-jump-row').hidden=true;
-  $('#flashcard').innerHTML=`<div class="finished-mark">✓</div><p class="eyebrow">SESSION COMPLETE</p><h2>今次溫習完成。</h2><p>${state.ratingEnabled?`${state.good} 張已記起${state.again?`，${state.again} 張已經再溫過。`:'。做得好。'}`:`已經快速睇完 ${state.deck.length} 張卡片。`}</p>`;
+  $('#flashcard').innerHTML=`<div class="finished-mark">✓</div><p class="eyebrow">SESSION COMPLETE</p><h2>今次溫習完成。</h2><p>已完成呢一輪 ${state.deck.length} 張卡片。</p>`;
   $('#answer-actions').innerHTML='<button class="reveal-button" id="restart-button">再溫一次</button>';
   $('#restart-button').addEventListener('click',()=>resetDeck());
 }
 
 function masteredIds(){try{return new Set(JSON.parse(localStorage.getItem('jp-study-mastered')||'[]'));}catch{return new Set();}}
-function saveMastered(id){const ids=masteredIds();ids.add(id);localStorage.setItem('jp-study-mastered',JSON.stringify([...ids]));}
 function localDateKey(date=new Date()){return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`;}
 function incrementToday(){const key=localDateKey(),saved=JSON.parse(localStorage.getItem('jp-study-today')||'{}');saved[key]=(saved[key]||0)+1;localStorage.setItem('jp-study-today',JSON.stringify(saved));updateToday();}
 function updateToday(){const key=localDateKey(),saved=JSON.parse(localStorage.getItem('jp-study-today')||'{}');$('#today-count').textContent=`${saved[key]||0} 張`;}
@@ -312,9 +381,14 @@ $('#deck-type').addEventListener('change',event=>{state.type=event.target.value;
 $('#year-select').addEventListener('change',event=>{state.year=Number(event.target.value);populateLessonSelect(null);resetDeck();});
 $('#lesson-select').addEventListener('change',event=>{state.lesson=Number(event.target.value);localStorage.setItem('jp-study-deck-lesson',String(state.lesson));resetDeck();});
 compactLessonLayout.addEventListener('change',()=>populateLessonSelect(state.lesson));
-$('#rating-options').addEventListener('change',event=>{state.ratingEnabled=event.target.checked;localStorage.setItem('jp-study-rating-options',String(state.ratingEnabled));resetDeck();showToast(state.ratingEnabled?'已開啟熟悉度評分':'已關閉熟悉度評分');});
 $('#card-direction').addEventListener('change',event=>{state.direction=event.target.value;resetDeck();});
-$('#shuffle-button').addEventListener('click',()=>{resetDeck(true);showToast('卡片已經洗牌');});
+$$('[data-order-mode]').forEach(button=>button.addEventListener('click',()=>setOrderMode(button.dataset.orderMode)));
+$('#reset-review-progress').addEventListener('click',()=>{
+  if(!state.scopeDeck.length)return;
+  if(!window.confirm('重設目前卡組的答對／答錯紀錄？收藏會保留。'))return;
+  state.reviewProgress=resetReviewStatuses(state.reviewProgress,state.scopeDeck);saveReviewProgress();
+  applyReviewFilter();state.revealed=false;renderCard();showToast('已重設目前卡組的溫習紀錄。');
+});
 const flashcardSwipe={pointerId:null,startX:0,startY:0,ignoreClick:false};
 const flashcard=$('#flashcard');
 flashcard.addEventListener('pointerdown',event=>{
@@ -349,5 +423,13 @@ $('#clear-filters').addEventListener('click',()=>{state.library={query:'',years:
 document.addEventListener('click',event=>{if(!event.target.closest('.library-filter'))closeFilterMenus();});
 document.addEventListener('dblclick',event=>event.preventDefault(),{passive:false});
 document.addEventListener('keydown',event=>{if(event.key==='Escape'){if($('.sidebar').classList.contains('open')){setDrawerOpen(false);$('#menu-button').focus();return;}const open=$('.library-filter .filter-menu:not([hidden])');if(open){const root=open.closest('.library-filter');closeFilterMenus();root.querySelector('.filter-trigger').focus();}}});
-document.addEventListener('keydown',event=>{if(state.view!=='review'||/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName))return;if(event.key==='ArrowRight'){event.preventDefault();nextQuickCard();return;}if(event.key==='ArrowLeft'){event.preventDefault();previousQuickCard();return;}if(!state.ratingEnabled){if(!state.revealed&&event.code==='Space'){event.preventDefault();revealCard();}else if(state.revealed&&event.code==='Space'){event.preventDefault();nextQuickCard();}return;}if(event.code==='Space'&&!state.revealed){event.preventDefault();revealCard();}if(state.revealed&&['1','2','3'].includes(event.key))rateCard({1:'again',2:'hard',3:'good'}[event.key]);});
+document.addEventListener('keydown',event=>{
+  if(state.view!=='review'||/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName))return;
+  if(event.key==='ArrowRight'){event.preventDefault();nextQuickCard();return;}
+  if(event.key==='ArrowLeft'){event.preventDefault();previousQuickCard();return;}
+  if(event.key.toLowerCase()==='x'){event.preventDefault();markCurrentCard('incorrect');return;}
+  if(event.key.toLowerCase()==='c'){event.preventDefault();markCurrentCard('correct');return;}
+  if(event.key.toLowerCase()==='s'){event.preventDefault();toggleCurrentBookmark();return;}
+  if(event.code==='Space'){event.preventDefault();state.revealed?hideAnswer():revealCard();}
+});
 applyTheme(document.documentElement.dataset.theme||'light');updateToday();loadData();
