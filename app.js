@@ -3,6 +3,7 @@ let fallbackAudio=null;
 const $=selector=>document.querySelector(selector);
 const $$=selector=>[...document.querySelectorAll(selector)];
 const escapeHtml=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+const compactLessonLayout=window.matchMedia('(max-width:780px)');
 
 async function loadData(){
   try{
@@ -45,6 +46,7 @@ function selectedLessonMeta(){return state.lessons.find(item=>item.schoolYear===
 function updateCourseDetails(){
   const meta=selectedLessonMeta(),lessonItems=state.all.filter(item=>item.schoolYear===state.year&&item.lesson===state.lesson);
   const vocabularyCount=lessonItems.filter(item=>item.type==='vocabulary').length,grammarCount=lessonItems.filter(item=>item.type==='grammar').length;
+  updateLessonBookContext();
   $('#course-year').textContent=`Year ${state.year}`;$('#course-book').textContent=`大家的日本語 · ${meta?.book||''}`;$('#course-lesson').textContent=`Lesson ${state.lesson} 已加入`;
   const deckBook=$('.deck-info span'),deckSummary=$('.deck-info p');
   if(deckBook)deckBook.textContent=meta?.book||'';
@@ -176,9 +178,19 @@ function populateYearSelect(years){$('#year-select').innerHTML=years.map(year=>`
 function populateLessonSelect(preferred){
   const lessons=sortedUnique(state.all.filter(item=>item.schoolYear===state.year).map(item=>item.lesson));
   state.lesson=lessons.includes(preferred)?preferred:lessons[0];
-  $('#lesson-select').innerHTML=lessons.map(lesson=>{const meta=state.lessons.find(item=>item.schoolYear===state.year&&item.lesson===lesson)||state.all.find(item=>item.schoolYear===state.year&&item.lesson===lesson);return `<option value="${lesson}">${meta?.book||''} · Lesson ${String(lesson).padStart(2,'0')}</option>`;}).join('');
+  const entries=lessons.map(lesson=>({lesson,meta:state.lessons.find(item=>item.schoolYear===state.year&&item.lesson===lesson)||state.all.find(item=>item.schoolYear===state.year&&item.lesson===lesson)}));
+  const groups=entries.reduce((result,entry)=>{const book=entry.meta?.book||'教材';if(!result.has(book))result.set(book,[]);result.get(book).push(entry);return result;},new Map());
+  const option=entry=>`<option value="${entry.lesson}">${compactLessonLayout.matches?`Lesson ${String(entry.lesson).padStart(2,'0')}`:`${escapeHtml(entry.meta?.book||'')} · Lesson ${String(entry.lesson).padStart(2,'0')}`}</option>`;
+  $('#lesson-select').innerHTML=groups.size>1?[...groups].map(([book,items])=>`<optgroup label="${escapeHtml(book)}">${items.map(option).join('')}</optgroup>`).join(''):entries.map(option).join('');
   $('#lesson-select').value=String(state.lesson);
+  updateLessonBookContext();
   localStorage.setItem('jp-study-deck-year',String(state.year));localStorage.setItem('jp-study-deck-lesson',String(state.lesson));
+}
+function updateLessonBookContext(){
+  const meta=selectedLessonMeta(),book=meta?.book||'';
+  const context=$('#lesson-book-context'),select=$('#lesson-select');
+  if(context){context.textContent=book;context.hidden=!compactLessonLayout.matches;}
+  if(select)select.setAttribute('aria-label',book?`選擇課堂：${book}`:'選擇課堂');
 }
 function populateLibraryFilter(key,options){
   const container=$(`[data-library-filter="${key}"] .filter-options`);
@@ -201,6 +213,20 @@ function updateLibraryFilterControls(){
 }
 function closeFilterMenus(except=null){$$('.library-filter').forEach(root=>{if(root===except)return;root.querySelector('.filter-menu').hidden=true;root.querySelector('.filter-trigger').setAttribute('aria-expanded','false');});}
 function clearLibraryFilter(key){state.library[key]=[];$(`[data-library-filter="${key}"]`).querySelectorAll('input').forEach(input=>input.checked=false);if(key==='years')refreshLibraryLessonFilter();updateLibraryFilterControls();saveLibraryFilters();renderLibrary();}
+const drawerBackdrop=$('#drawer-backdrop');
+let drawerHideTimer;
+function setDrawerOpen(open){
+  const sidebar=$('.sidebar'),menuButton=$('#menu-button');
+  clearTimeout(drawerHideTimer);
+  sidebar.classList.toggle('open',open);
+  menuButton.setAttribute('aria-expanded',String(open));
+  menuButton.setAttribute('aria-label',open?'關閉選單':'開啟選單');
+  menuButton.textContent=open?'×':'☰';
+  document.body.classList.toggle('drawer-open',open&&window.matchMedia('(max-width:780px)').matches);
+  if(open){drawerBackdrop.hidden=false;requestAnimationFrame(()=>drawerBackdrop.classList.add('is-visible'));return;}
+  drawerBackdrop.classList.remove('is-visible');
+  drawerHideTimer=setTimeout(()=>{if(!sidebar.classList.contains('open'))drawerBackdrop.hidden=true;},200);
+}
 
 function renderLibrary(){
   const query=normalizeSearch(state.library.query.trim()),mastered=masteredIds();
@@ -213,7 +239,7 @@ function renderLibrary(){
 
 function switchView(view){
   state.view=view;$$('.view').forEach(panel=>panel.classList.toggle('active',panel.id===`${view}-view`));$$('.nav-item').forEach(item=>item.classList.toggle('active',item.dataset.view===view));
-  $('.sidebar').classList.remove('open');$('#menu-button').setAttribute('aria-expanded','false');if(view==='library')renderLibrary();if(view==='conjugation')loadConjugation();
+  setDrawerOpen(false);if(view==='library')renderLibrary();if(view==='conjugation')loadConjugation();
 }
 
 const conjugationState={forms:[],verbs:[],keigo:null,quick:null,plain:null,derived:null,quickVerb:'待ちます',plainType:'verb',formId:'dictionary',section:'basic',group:'ALL',query:'',revealed:false,loaded:false};
@@ -278,11 +304,14 @@ function showToast(message){const toast=$('#toast');toast.textContent=message;to
 function applyTheme(theme){document.documentElement.dataset.theme=theme;localStorage.setItem('jp-study-theme',theme);const dark=theme==='dark';$('#theme-icon').textContent=dark?'☀':'☾';$('#theme-toggle').setAttribute('aria-label',dark?'切換至日間模式':'切換至夜間模式');document.querySelector('meta[name="theme-color"]').content=dark?'#030712':'#f8fafc';}
 
 $$('.nav-item').forEach(item=>item.addEventListener('click',()=>switchView(item.dataset.view)));
-$('#menu-button').addEventListener('click',()=>{const open=$('.sidebar').classList.toggle('open');$('#menu-button').setAttribute('aria-expanded',String(open));});
+$('#menu-button').addEventListener('click',()=>setDrawerOpen(!$('.sidebar').classList.contains('open')));
+drawerBackdrop.addEventListener('click',()=>setDrawerOpen(false));
+window.matchMedia('(max-width:780px)').addEventListener('change',event=>{if(!event.matches)setDrawerOpen(false);});
 $('#theme-toggle').addEventListener('click',()=>applyTheme(document.documentElement.dataset.theme==='dark'?'light':'dark'));
 $('#deck-type').addEventListener('change',event=>{state.type=event.target.value;resetDeck();});
 $('#year-select').addEventListener('change',event=>{state.year=Number(event.target.value);populateLessonSelect(null);resetDeck();});
 $('#lesson-select').addEventListener('change',event=>{state.lesson=Number(event.target.value);localStorage.setItem('jp-study-deck-lesson',String(state.lesson));resetDeck();});
+compactLessonLayout.addEventListener('change',()=>populateLessonSelect(state.lesson));
 $('#rating-options').addEventListener('change',event=>{state.ratingEnabled=event.target.checked;localStorage.setItem('jp-study-rating-options',String(state.ratingEnabled));resetDeck();showToast(state.ratingEnabled?'已開啟熟悉度評分':'已關閉熟悉度評分');});
 $('#card-direction').addEventListener('change',event=>{state.direction=event.target.value;resetDeck();});
 $('#shuffle-button').addEventListener('click',()=>{resetDeck(true);showToast('卡片已經洗牌');});
@@ -319,6 +348,6 @@ $$('.library-filter').forEach(root=>{
 $('#clear-filters').addEventListener('click',()=>{state.library={query:'',years:[],lessons:[],types:[]};$('#search-input').value='';$$('.library-filter input').forEach(input=>input.checked=false);refreshLibraryLessonFilter();updateLibraryFilterControls();saveLibraryFilters();renderLibrary();});
 document.addEventListener('click',event=>{if(!event.target.closest('.library-filter'))closeFilterMenus();});
 document.addEventListener('dblclick',event=>event.preventDefault(),{passive:false});
-document.addEventListener('keydown',event=>{if(event.key==='Escape'){const open=$('.library-filter .filter-menu:not([hidden])');if(open){const root=open.closest('.library-filter');closeFilterMenus();root.querySelector('.filter-trigger').focus();}}});
+document.addEventListener('keydown',event=>{if(event.key==='Escape'){if($('.sidebar').classList.contains('open')){setDrawerOpen(false);$('#menu-button').focus();return;}const open=$('.library-filter .filter-menu:not([hidden])');if(open){const root=open.closest('.library-filter');closeFilterMenus();root.querySelector('.filter-trigger').focus();}}});
 document.addEventListener('keydown',event=>{if(state.view!=='review'||/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName))return;if(event.key==='ArrowRight'){event.preventDefault();nextQuickCard();return;}if(event.key==='ArrowLeft'){event.preventDefault();previousQuickCard();return;}if(!state.ratingEnabled){if(!state.revealed&&event.code==='Space'){event.preventDefault();revealCard();}else if(state.revealed&&event.code==='Space'){event.preventDefault();nextQuickCard();}return;}if(event.code==='Space'&&!state.revealed){event.preventDefault();revealCard();}if(state.revealed&&['1','2','3'].includes(event.key))rateCard({1:'again',2:'hard',3:'good'}[event.key]);});
 applyTheme(document.documentElement.dataset.theme||'light');updateToday();loadData();
